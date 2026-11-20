@@ -1,54 +1,77 @@
-// news-image-20261119 — entry program for make.fun
-//
-// The entry is a newspaper front page, "THE WORLD IN ONE DAY —
-// THURSDAY 19 NOVEMBER 2026", summing up the real world news of
-// Thursday 19 November 2026 as reported by early that day (UTC):
-// the first-ever U.S.–China–Russia summit in Shenzhen, the mine
-// strikes on tankers off the Strait of Hormuz, the World Court's
-// ruling on Myanmar's alleged Rohingya genocide, Israeli tanks
-// crossing the Gaza ceasefire line, the worldwide launch of GTA VI,
-// a record $190.4M Van Gogh sale, and Cyclone Akvan bearing down
-// on India — plus a short strip of the day's other stories.
-//
-// The image itself lives in this repository as entry.png (1024x1024,
-// under 1 MiB). This program does the only thing the run needs:
-// it copies that image to the output directory make.fun hands it,
-// as entry.png, byte for byte. It uses no network and writes the
-// same bytes on every run.
+// news-image-20261119 — round-2 refresh (full-day coverage).
+// Copies the front-page image (entry.png) to the output directory and
+// self-verifies it: PNG signature, 1024x1024 dimensions, the 1 MiB size
+// cap, and a sha256 match between the source and the written copy.
+// Both runs write exactly the same bytes, because the file is copied,
+// not redrawn. Runs with plain `node main.ts` (Node 22, stdlib only).
 
-import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The image this repository ships, next to this program.
-const IMAGE_NAME = "entry.png";
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const MAX_BYTES = 1048576;
+const EXPECTED_WIDTH = 1024;
+const EXPECTED_HEIGHT = 1024;
 
-// The environment variable make.fun sets to the output directory.
-const OUTPUT_DIR_ENV = "MAKEFUN_OUTPUT_DIR";
+const repoDir = dirname(fileURLToPath(import.meta.url));
+const sourcePath = join(repoDir, "entry.png");
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
+const outputPath = join(outputDir, "entry.png");
 
-function repoRoot(): string {
-  return dirname(fileURLToPath(import.meta.url));
+function sha256(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
-function main(): void {
-  const outDir = process.env[OUTPUT_DIR_ENV];
-  if (!outDir) {
-    throw new Error(`${OUTPUT_DIR_ENV} is not set`);
+function pngDimensions(bytes: Buffer): { width: number; height: number } {
+  if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    throw new Error("entry.png is not a PNG file");
   }
-  const source = join(repoRoot(), IMAGE_NAME);
-  if (!existsSync(source)) {
-    throw new Error(`missing ${IMAGE_NAME} in ${repoRoot()}`);
+  // The IHDR chunk must be first: 4-byte length (13), then "IHDR".
+  if (bytes.readUInt32BE(8) !== 13 || bytes.toString("ascii", 12, 16) !== "IHDR") {
+    throw new Error("entry.png has no IHDR chunk where it should be");
   }
-  mkdirSync(outDir, { recursive: true });
-  const target = join(outDir, IMAGE_NAME);
-  copyFileSync(source, target);
-  // Confirm the copy landed whole before we report success.
-  const written = statSync(target);
-  const shipped = statSync(source);
-  if (written.size !== shipped.size) {
-    throw new Error(`short write: ${written.size} of ${shipped.size} bytes`);
-  }
-  console.log(`wrote ${target} (${written.size} bytes)`);
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  return { width, height };
 }
 
-main();
+function pngIsWhole(bytes: Buffer): boolean {
+  // A whole PNG ends with the IEND chunk: length 0, type "IEND", CRC.
+  const tail = bytes.subarray(bytes.length - 12);
+  return tail.readUInt32BE(0) === 0 && tail.toString("ascii", 4, 8) === "IEND";
+}
+
+const source = readFileSync(sourcePath);
+const { width, height } = pngDimensions(source);
+if (width !== EXPECTED_WIDTH || height !== EXPECTED_HEIGHT) {
+  throw new Error(`entry.png is ${width}x${height}, expected 1024x1024`);
+}
+if (source.length > MAX_BYTES) {
+  throw new Error(`entry.png is ${source.length} bytes, over the 1 MiB cap`);
+}
+if (!pngIsWhole(source)) {
+  throw new Error("entry.png is truncated: no IEND chunk at the end");
+}
+const sourceHash = sha256(source);
+
+// Create the output directory if needed; never delete it (the grader's
+// /output is a mount, and removing it fails).
+mkdirSync(outputDir, { recursive: true });
+copyFileSync(sourcePath, outputPath);
+
+const written = readFileSync(outputPath);
+const writtenHash = sha256(written);
+if (writtenHash !== sourceHash) {
+  throw new Error(`output sha256 ${writtenHash} != source sha256 ${sourceHash}`);
+}
+const writtenSize = statSync(outputPath).size;
+if (writtenSize !== source.length) {
+  throw new Error(`output is ${writtenSize} bytes, source is ${source.length}`);
+}
+
+console.log(
+  `entry.png verified: ${width}x${height}, ${source.length} bytes, sha256 ${sourceHash}`
+);
+console.log(`wrote ${outputPath}`);
